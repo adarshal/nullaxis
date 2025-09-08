@@ -89,7 +89,7 @@ class NYC311SQLAgent:
     def _generate_query(self, state: MessagesState):
         """Generate SQL query using LLM with forced tool usage"""
         system_prompt = """
-        You are a SQL expert for NYC 311 complaints data.Dont generate fake data or facts.Get data from database by runnig sql queries.
+        You are a SQL expert for NYC 311 complaints data. Don't generate fake data or facts. Get data from database by running SQL queries.
         You MUST use the sql_db_query tool to execute SQL queries and answer the user's question.
         
         Available columns: unique_key, created_date, closed_date, complaint_type, 
@@ -98,10 +98,13 @@ class NYC311SQLAgent:
         Rules:
         - You MUST use the sql_db_query tool to execute SQL queries
         - Only use SELECT statements
-        - Limit results to top 10 unless specified
+        - For "top N" questions, use LIMIT N (e.g., "top 10" = LIMIT 10)
+        - For general analysis questions, use LIMIT 50 to get comprehensive results
         - Use proper SQLite syntax
         - Handle NULL values appropriately
         - Do not provide conversational responses - always execute SQL queries
+        - Use COUNT(*) for counting records
+        - Use GROUP BY for aggregations
         
         IMPORTANT: Use the sql_db_query tool to answer the user's question with actual data.
         """
@@ -303,11 +306,13 @@ class NYC311SQLAgent:
             q = q.split(';')[0].strip()
             sql_logger.warning("Multiple statements detected, using first statement only")
         
-        # Auto-add LIMIT if missing (performance)
+        # Auto-add LIMIT if missing (performance) - but don't override existing LIMIT
         q_upper = q.upper()
         if " LIMIT " not in q_upper:
             q += " LIMIT 50"
             sql_logger.info("Added LIMIT 50 for performance")
+        else:
+            sql_logger.info(f"Query already has LIMIT clause: {q_upper.split('LIMIT')[1].split()[0] if 'LIMIT' in q_upper else 'unknown'}")
         
         # Validate table access (security)
         if "complaints" not in q_upper:
@@ -351,8 +356,10 @@ class NYC311SQLAgent:
                 Convert this NYC 311 data analysis result into a clear, natural language response that answers the user's question.
                 
                 User's Question: {user_question}
-                Data Records: {json.dumps(records[:10])}  # Show first 10 for context
-                Total Records: {len(records)}
+                Sample Data Records: {json.dumps(records[:10])}  # Show first 10 for context
+                Total Records in Database: {total_count:,}
+                Records Returned: {len(records)}
+                Context: {context_note}
                 
                 Requirements:
                 1. Answer the user's question directly and clearly
@@ -362,9 +369,10 @@ class NYC311SQLAgent:
                 5. Include specific numbers and statistics
                 6. Do NOT mention JSON, SQL queries, or technical details
                 7. Focus on actionable insights about NYC 311 complaints
+                8. Use the context note to accurately describe the data scope
                 
                 Example format:
-                "Based on the analysis of {len(records)} records, [direct answer]. Here are the key findings:
+                "Based on the analysis of the NYC 311 database ({context_note}), [direct answer]. Here are the key findings:
                 • [Key insight with specific numbers]
                 • [Key insight with specific numbers]
                 • [Key insight with specific numbers]"

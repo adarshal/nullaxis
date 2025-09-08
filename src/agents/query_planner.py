@@ -64,8 +64,13 @@ class QueryPlanner:
         ANALYSIS APPROACH:
         1. Determine if this is a SIMPLE (single query) or COMPLEX (multi-step) question
         2. Break complex questions into logical steps
-        3. Identify what data is needed for each step
-        4. Plan the best visualization for the final result
+        3. Choose appropriate agent type for each step:
+           - sql: Direct SQL queries for basic aggregations
+           - prebuilt: Pre-built analytics functions for common patterns
+           - custom: Custom Python analysis for complex statistical operations
+           - transform: Data transformation and formatting steps
+        4. Plan dependencies between steps
+        5. Select the best visualization for the final result
         
         EXAMPLES OF MULTI-STEP QUESTIONS:
         - "For the top 5 complaint types, what percent were closed within 3 days?"
@@ -162,49 +167,68 @@ class QueryPlanner:
         return validated
     
     def _create_simple_fallback_plan(self, question: str) -> AnalysisPlan:
-        """Create a simple single-step plan as fallback"""
-        # Analyze question for intent
-        chart_type = "bar"  # default
-        query = "SELECT complaint_type, COUNT(*) as count FROM complaints GROUP BY complaint_type ORDER BY count DESC LIMIT 10"
-        
+        """Create a simple single-step plan as fallback using advanced capabilities"""
         question_lower = question.lower()
         
-        # Basic intent detection
-        if any(word in question_lower for word in ['percent', 'percentage', 'proportion']):
+        # Enhanced intent detection with intelligent agent selection
+        chart_type = "bar"  # default
+        agent_type = "sql"  # default
+        query = "SELECT complaint_type, COUNT(*) as count FROM complaints GROUP BY complaint_type ORDER BY count DESC LIMIT 10"
+        description = f"Analyze: {question}"
+        
+        # Use prebuilt analytics for common patterns
+        if any(word in question_lower for word in ['top', 'most', 'highest']) and 'complaint' in question_lower:
+            agent_type = "prebuilt"
+            query = "get_top_k('complaint_type', 10)"
+            description = "Get top complaint types using prebuilt analytics"
+            
+        elif any(word in question_lower for word in ['percent', 'percentage', 'proportion']):
             chart_type = "pie"
             if 'closed within 3 days' in question_lower:
-                query = """
-                SELECT 
-                    CASE WHEN closed_within_3_days = 1 THEN 'Closed within 3 days' 
-                         ELSE 'Not closed within 3 days' END as closure_status,
-                    COUNT(*) as count
-                FROM complaints 
-                GROUP BY closed_within_3_days
-                """
+                agent_type = "prebuilt"
+                query = "percent_closed_within_days(3, 'complaint_type')"
+                description = "Calculate closure percentages using prebuilt analytics"
+            elif 'geocoded' in question_lower or 'latitude' in question_lower or 'longitude' in question_lower:
+                agent_type = "prebuilt"
+                query = "geo_validity()"
+                description = "Check geocoding validity using prebuilt analytics"
+                
         elif any(word in question_lower for word in ['zip', 'zipcode', 'zip code']):
-            query = "SELECT incident_zip, COUNT(*) as count FROM complaints WHERE incident_zip IS NOT NULL GROUP BY incident_zip ORDER BY count DESC LIMIT 10"
-        elif 'geocoded' in question_lower or 'latitude' in question_lower or 'longitude' in question_lower:
-            chart_type = "pie"
-            query = """
-            SELECT 
-                CASE WHEN is_geocoded = 1 THEN 'Valid coordinates' 
-                     ELSE 'No coordinates' END as geocoding_status,
-                COUNT(*) as count
-            FROM complaints 
-            GROUP BY is_geocoded
-            """
+            agent_type = "prebuilt"
+            query = "complaints_by_zip(10)"
+            description = "Analyze complaints by ZIP code using prebuilt analytics"
+            
         elif 'borough' in question_lower:
             chart_type = "pie"
-            query = "SELECT borough, COUNT(*) as count FROM complaints WHERE borough IS NOT NULL GROUP BY borough ORDER BY count DESC"
-        
+            agent_type = "prebuilt"
+            query = "complaints_by_borough()"
+            description = "Analyze complaints by borough using prebuilt analytics"
+            
+        elif any(word in question_lower for word in ['trend', 'time', 'seasonal', 'monthly']):
+            chart_type = "line"
+            agent_type = "prebuilt"
+            query = "time_series_trend('month')"
+            description = "Generate time series trends using prebuilt analytics"
+            
+        elif any(word in question_lower for word in ['resolution', 'closure', 'response']):
+            agent_type = "prebuilt"
+            query = "avg_closure_time('complaint_type')"
+            description = "Calculate average closure times using prebuilt analytics"
+            
+        # For complex statistical questions, use custom analysis
+        elif any(pattern in question_lower for pattern in ['correlation', 'regression', 'distribution', 'variance', 'standard deviation']):
+            agent_type = "custom"
+            query = question  # Pass the full question for custom code generation
+            description = "Perform statistical analysis using custom Python code"
+            
         return {
             "question": question,
             "complexity": "simple",
             "requires_multi_step": False,
             "steps": [{
                 "step_id": "step_1",
-                "description": f"Analyze: {question}",
-                "agent_type": "sql",
+                "description": description,
+                "agent_type": agent_type,
                 "query": query,
                 "depends_on": [],
                 "output_type": "data"

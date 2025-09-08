@@ -5,6 +5,8 @@ import json
 import pandas as pd
 from .query_planner import QueryPlanner, AnalysisPlan, AnalysisStep
 from .sql_agent import NYC311SQLAgent
+from ..executors.prebuilt_functions import PrebuiltAnalytics
+from ..executors.code_writer import CodeWriter
 
 logger = logging.getLogger(__name__)
 
@@ -33,6 +35,10 @@ class AnalysisOrchestrator:
         self.sql_agent = sql_agent
         self.db_path = db_path
         self.query_planner = QueryPlanner(deepseek_client.reasoner)
+        
+        # Initialize advanced analysis components
+        self.prebuilt_analytics = PrebuiltAnalytics(db_path)
+        self.code_writer = CodeWriter(db_path)
         
         # Results cache for multi-step workflows
         self.step_results: Dict[str, StepResult] = {}
@@ -206,6 +212,9 @@ class AnalysisOrchestrator:
         # If this step depends on previous steps, modify the query
         if context and step["depends_on"]:
             query = self._adapt_query_with_context(query, context)
+        else:
+            # Still ensure SQLite compatibility for standalone queries
+            query = self._make_sqlite_compatible(query)
         
         # Use the existing SQL agent to execute
         try:
@@ -271,57 +280,452 @@ class AnalysisOrchestrator:
     
     def _execute_prebuilt_step(self, step: AnalysisStep, context: Dict[str, Any]) -> StepResult:
         """Execute a prebuilt analytics function"""
-        # TODO: Integrate with PrebuiltAnalytics
-        return {
-            "step_id": step["step_id"],
-            "success": False,
-            "data": None,
-            "error": "Prebuilt analytics not yet integrated",
-            "metadata": {"step": step}
-        }
+        logger.info(f"Executing prebuilt analytics step: {step['query']}")
+        
+        try:
+            # Parse function call from query
+            function_call = step["query"]
+            
+            # Map common queries to prebuilt functions
+            function_mappings = {
+                "get_top_k": self.prebuilt_analytics.get_top_k,
+                "percent_closed_within_days": self.prebuilt_analytics.percent_closed_within_days,
+                "complaints_by_zip": self.prebuilt_analytics.complaints_by_zip,
+                "complaints_by_borough": self.prebuilt_analytics.complaints_by_borough,
+                "geo_validity": self.prebuilt_analytics.geo_validity,
+                "time_series_trend": self.prebuilt_analytics.time_series_trend,
+                "avg_closure_time": self.prebuilt_analytics.avg_closure_time,
+                "complaints_by_agency": self.prebuilt_analytics.complaints_by_agency,
+                "open_vs_closed": self.prebuilt_analytics.open_vs_closed
+            }
+            
+            # Try to match the function call
+            for func_name, func in function_mappings.items():
+                if func_name in function_call.lower():
+                    # Extract parameters (simple implementation)
+                    if "top_k" in function_call.lower() and "complaint_type" in function_call.lower():
+                        result = self.prebuilt_analytics.get_top_k("complaint_type", 10)
+                    elif "closed_within" in function_call.lower():
+                        result = self.prebuilt_analytics.percent_closed_within_days(3, "complaint_type")
+                    elif "by_zip" in function_call.lower():
+                        result = self.prebuilt_analytics.complaints_by_zip(10)
+                    elif "by_borough" in function_call.lower():
+                        result = self.prebuilt_analytics.complaints_by_borough()
+                    elif "time_series" in function_call.lower() or "trend" in function_call.lower():
+                        result = self.prebuilt_analytics.time_series_trend("month")
+                    else:
+                        # Default to the first matched function
+                        result = func()
+                    
+                    if "error" not in result:
+                        return {
+                            "step_id": step["step_id"],
+                            "success": True,
+                            "data": result["data"],
+                            "error": None,
+                            "metadata": {
+                                "step": step,
+                                "function": func_name,
+                                "row_count": len(result["data"]) if result["data"] else 0,
+                                "chart_type": result.get("chart_type", "bar")
+                            }
+                        }
+                    else:
+                        return {
+                            "step_id": step["step_id"],
+                            "success": False,
+                            "data": None,
+                            "error": result["error"],
+                            "metadata": {"step": step, "function": func_name}
+                        }
+            
+            # If no function matched, fall back to SQL execution
+            logger.warning(f"No prebuilt function matched for: {function_call}, falling back to SQL")
+            return self._execute_sql_step(step, context)
+            
+        except Exception as e:
+            logger.error(f"Prebuilt analytics step failed: {e}")
+            return {
+                "step_id": step["step_id"],
+                "success": False,
+                "data": None,
+                "error": f"Prebuilt analytics execution failed: {str(e)}",
+                "metadata": {"step": step}
+            }
     
     def _execute_custom_step(self, step: AnalysisStep, context: Dict[str, Any]) -> StepResult:
-        """Execute custom Python analysis"""
-        # TODO: Integrate with CodeWriter
-        return {
-            "step_id": step["step_id"],
-            "success": False,
-            "data": None,
-            "error": "Custom analysis not yet integrated",
-            "metadata": {"step": step}
-        }
+        """Execute custom Python analysis using CodeWriter"""
+        logger.info(f"Executing custom Python analysis: {step['description']}")
+        
+        try:
+            # Generate Python code based on the step description and context
+            code_prompt = self._generate_custom_code_from_step(step, context)
+            
+            # Execute custom code
+            result = self.code_writer.execute_custom_code(code_prompt, step["query"])
+            
+            if "error" not in result:
+                # Convert result to standard format
+                data = []
+                if result.get("result") is not None:
+                    if isinstance(result["result"], pd.DataFrame):
+                        data = result["result"].to_dict('records')
+                    elif isinstance(result["result"], list):
+                        data = result["result"]
+                    elif isinstance(result["result"], dict):
+                        data = [result["result"]]
+                    else:
+                        # Single value result
+                        data = [{"result": result["result"]}]
+                
+                return {
+                    "step_id": step["step_id"],
+                    "success": True,
+                    "data": data,
+                    "error": None,
+                    "metadata": {
+                        "step": step,
+                        "code_executed": code_prompt,
+                        "output": result.get("output", ""),
+                        "row_count": len(data) if data else 0,
+                        "chart_type": result.get("chart_type", "table")
+                    }
+                }
+            else:
+                return {
+                    "step_id": step["step_id"],
+                    "success": False,
+                    "data": None,
+                    "error": result["error"],
+                    "metadata": {
+                        "step": step,
+                        "code_attempted": code_prompt,
+                        "traceback": result.get("traceback", "")
+                    }
+                }
+                
+        except Exception as e:
+            logger.error(f"Custom analysis step failed: {e}")
+            return {
+                "step_id": step["step_id"],
+                "success": False,
+                "data": None,
+                "error": f"Custom analysis execution failed: {str(e)}",
+                "metadata": {"step": step}
+            }
+    
+    def _generate_custom_code_from_step(self, step: AnalysisStep, context: Dict[str, Any]) -> str:
+        """Generate Python code for custom analysis based on step description and context"""
+        description = step["description"]
+        
+        # Start with basic template
+        code = """
+# Custom analysis for: {description}
+
+""".format(description=description)
+        
+        # Add context data if available
+        if context:
+            code += "# Context from previous steps:\n"
+            for step_id, data in context.items():
+                if data:
+                    code += f"# {step_id}: {len(data)} records\n"
+        
+        # Generate specific code based on description patterns
+        description_lower = description.lower()
+        
+        if "seasonal" in description_lower and "trend" in description_lower:
+            code += """
+# Analyze seasonal trends
+df['created_date'] = pd.to_datetime(df['created_date'])
+df['month'] = df['created_date'].dt.month
+df['year'] = df['created_date'].dt.year
+
+# Group by month and complaint type for seasonal analysis
+seasonal_data = df.groupby(['month', 'complaint_type']).size().reset_index(name='count')
+
+# Focus on top complaint types if specified in context
+if len(seasonal_data) > 100:  # If too much data, focus on top types
+    top_types = df.groupby('complaint_type').size().nlargest(3).index.tolist()
+    seasonal_data = seasonal_data[seasonal_data['complaint_type'].isin(top_types)]
+
+result = seasonal_data.to_dict('records')
+"""
+        
+        elif "percent" in description_lower and "closed" in description_lower:
+            code += """
+# Calculate closure percentages
+df['closure_days'] = (pd.to_datetime(df['closed_date']) - pd.to_datetime(df['created_date'])).dt.days
+df['closed_within_3_days'] = (df['closure_days'] <= 3) & (df['closure_days'] >= 0)
+
+# Group by complaint type
+closure_stats = df.groupby('complaint_type').agg({
+    'closed_within_3_days': ['count', 'sum'],
+    'unique_key': 'count'
+}).round(2)
+
+closure_stats.columns = ['total_closed_3days', 'count_closed_3days', 'total_complaints']
+closure_stats['percentage_closed_3days'] = (
+    closure_stats['count_closed_3days'] / closure_stats['total_complaints'] * 100
+).round(2)
+
+result = closure_stats.reset_index().to_dict('records')
+"""
+        
+        elif "fastest" in description_lower or "resolution" in description_lower:
+            code += """
+# Calculate resolution times
+df['resolution_days'] = (pd.to_datetime(df['closed_date']) - pd.to_datetime(df['created_date'])).dt.days
+df_closed = df[df['closed_date'].notna() & (df['resolution_days'] >= 0)]
+
+# Group by the relevant dimension (zip, borough, etc.)
+group_col = 'incident_zip' if 'zip' in description.lower() else 'borough'
+resolution_stats = df_closed.groupby(group_col).agg({
+    'resolution_days': ['mean', 'count']
+}).round(2)
+
+resolution_stats.columns = ['avg_resolution_days', 'complaint_count']
+resolution_stats = resolution_stats[resolution_stats['complaint_count'] >= 10]  # Filter for significance
+
+result = resolution_stats.sort_values('avg_resolution_days').reset_index().to_dict('records')
+"""
+        
+        else:
+            # Generic aggregation
+            code += """
+# Generic data analysis
+if 'complaint_type' in df.columns:
+    result = df.groupby('complaint_type').size().sort_values(ascending=False).head(10).reset_index(name='count').to_dict('records')
+else:
+    result = df.head(10).to_dict('records')
+"""
+        
+        return code
     
     def _execute_transform_step(self, step: AnalysisStep, context: Dict[str, Any]) -> StepResult:
         """Execute data transformation step"""
-        # TODO: Implement data transformation logic
-        return {
-            "step_id": step["step_id"],
-            "success": False,
-            "data": None,
-            "error": "Data transformation not yet implemented",
-            "metadata": {"step": step}
-        }
+        logger.info(f"Executing data transformation: {step['description']}")
+        
+        try:
+            # Get data from previous steps
+            input_data = []
+            for dep_id in step.get("depends_on", []):
+                if dep_id in context:
+                    input_data.extend(context[dep_id])
+            
+            if not input_data:
+                return {
+                    "step_id": step["step_id"],
+                    "success": False,
+                    "data": None,
+                    "error": "No input data available for transformation",
+                    "metadata": {"step": step}
+                }
+            
+            # Convert to DataFrame for processing
+            df = pd.DataFrame(input_data)
+            
+            # Apply transformations based on step description
+            description_lower = step["description"].lower()
+            transformed_data = df
+            
+            if "combine" in description_lower or "merge" in description_lower:
+                # Simple combination of results
+                transformed_data = df.groupby('complaint_type').agg({
+                    'count': 'sum'
+                }).reset_index() if 'complaint_type' in df.columns and 'count' in df.columns else df
+                
+            elif "filter" in description_lower:
+                # Filter top N results
+                if 'count' in df.columns:
+                    transformed_data = df.nlargest(10, 'count')
+                else:
+                    transformed_data = df.head(10)
+                    
+            elif "percentage" in description_lower:
+                # Add percentage calculations
+                if 'count' in df.columns:
+                    total = df['count'].sum()
+                    transformed_data = df.copy()
+                    transformed_data['percentage'] = (df['count'] / total * 100).round(2)
+                    
+            elif "format" in description_lower:
+                # Format for visualization
+                if len(df.columns) >= 2:
+                    # Ensure standard column names for charting
+                    transformed_data = df.copy()
+                    if df.columns.tolist() != ['category', 'value']:
+                        transformed_data.columns = ['category', 'value'][:len(df.columns)]
+            
+            result_data = transformed_data.to_dict('records')
+            
+            return {
+                "step_id": step["step_id"],
+                "success": True,
+                "data": result_data,
+                "error": None,
+                "metadata": {
+                    "step": step,
+                    "input_rows": len(input_data),
+                    "output_rows": len(result_data),
+                    "transformation_type": "data_transformation"
+                }
+            }
+            
+        except Exception as e:
+            logger.error(f"Data transformation step failed: {e}")
+            return {
+                "step_id": step["step_id"],
+                "success": False,
+                "data": None,
+                "error": f"Data transformation failed: {str(e)}",
+                "metadata": {"step": step}
+            }
     
     def _dependencies_satisfied(self, step: AnalysisStep, results: Dict[str, StepResult]) -> bool:
         """Check if step dependencies are satisfied"""
+        # If no explicit dependencies, allow execution (will use all previous results)
+        if not step.get("depends_on"):
+            return True
+        
+        # Check explicit dependencies
         for dep_id in step["depends_on"]:
             if dep_id not in results or not results[dep_id]["success"]:
+                logger.warning(f"Dependency {dep_id} not satisfied for step {step['step_id']}")
                 return False
+        
+        logger.info(f"All dependencies satisfied for step {step['step_id']}")
         return True
     
     def _build_step_context(self, step: AnalysisStep, results: Dict[str, StepResult]) -> Dict[str, Any]:
         """Build context for step execution from previous results"""
         context = {}
+        
+        # Add successful previous step results to context
         for dep_id in step["depends_on"]:
             if dep_id in results and results[dep_id]["success"]:
                 context[dep_id] = results[dep_id]["data"]
+                logger.info(f"Added {dep_id} to context with {len(results[dep_id]['data']) if results[dep_id]['data'] else 0} records")
+        
+        # Also include all previous successful steps for potential use
+        # This helps with cases where the step doesn't explicitly list dependencies
+        for step_id, result in results.items():
+            if result["success"] and step_id not in context:
+                context[step_id] = result["data"]
+                logger.info(f"Added {step_id} to context as available data with {len(result['data']) if result['data'] else 0} records")
+        
+        logger.info(f"Built context with {len(context)} data sources: {list(context.keys())}")
         return context
     
     def _adapt_query_with_context(self, query: str, context: Dict[str, Any]) -> str:
         """Adapt SQL query based on context from previous steps"""
-        # This is a simplified implementation
-        # In a more sophisticated system, you'd have more complex query modification logic
-        return query
+        logger.info(f"Adapting query with context: {list(context.keys())}")
+        
+        adapted_query = query
+        
+        # Replace step references with actual data
+        for step_id, data in context.items():
+            if data and isinstance(data, list):
+                # Handle different types of context injection
+                
+                # Case 1: IN clause with specific values
+                step_table_ref = f"{step_id}_output"
+                if step_table_ref in adapted_query:
+                    # Extract values from the context data
+                    if data and isinstance(data[0], dict):
+                        # Try to find the right column to extract
+                        first_record = data[0]
+                        
+                        # For complaint types, look for complaint_type field
+                        if 'complaint_type' in first_record:
+                            complaint_types = [f"'{record['complaint_type']}'" for record in data]
+                            values_list = "(" + ", ".join(complaint_types) + ")"
+                            adapted_query = adapted_query.replace(
+                                f"(SELECT complaint_type FROM {step_table_ref})", 
+                                values_list
+                            )
+                            logger.info(f"Replaced {step_table_ref} with {len(complaint_types)} complaint types")
+                        
+                        # For ZIP codes
+                        elif 'incident_zip' in first_record:
+                            zip_codes = [f"'{record['incident_zip']}'" for record in data if record['incident_zip']]
+                            values_list = "(" + ", ".join(zip_codes) + ")"
+                            adapted_query = adapted_query.replace(
+                                f"(SELECT incident_zip FROM {step_table_ref})",
+                                values_list
+                            )
+                            logger.info(f"Replaced {step_table_ref} with {len(zip_codes)} ZIP codes")
+                        
+                        # For boroughs
+                        elif 'borough' in first_record:
+                            boroughs = [f"'{record['borough']}'" for record in data if record['borough']]
+                            values_list = "(" + ", ".join(boroughs) + ")"
+                            adapted_query = adapted_query.replace(
+                                f"(SELECT borough FROM {step_table_ref})",
+                                values_list
+                            )
+                            logger.info(f"Replaced {step_table_ref} with {len(boroughs)} boroughs")
+                        
+                        # Generic fallback - use first column
+                        else:
+                            first_col = list(first_record.keys())[0]
+                            values = [f"'{record[first_col]}'" for record in data if record[first_col]]
+                            if values:
+                                values_list = "(" + ", ".join(values) + ")"
+                                adapted_query = adapted_query.replace(
+                                    f"(SELECT {first_col} FROM {step_table_ref})",
+                                    values_list
+                                )
+                                logger.info(f"Replaced {step_table_ref} with {len(values)} values from {first_col}")
+        
+        logger.info(f"Adapted query: {adapted_query}")
+        
+        # Make sure query is SQLite compatible
+        adapted_query = self._make_sqlite_compatible(adapted_query)
+        logger.info(f"SQLite-compatible query: {adapted_query}")
+        
+        return adapted_query
+    
+    def _make_sqlite_compatible(self, query: str) -> str:
+        """Convert SQL query to be SQLite compatible"""
+        sqlite_query = query
+        
+        # Replace PostgreSQL EXTRACT with SQLite julianday functions
+        import re
+        
+        # Pattern: EXTRACT(EPOCH FROM (date1 - date2)) -> (julianday(date1) - julianday(date2)) * 86400
+        epoch_pattern = r'EXTRACT\(EPOCH\s+FROM\s+\(([^)]+)\s*-\s*([^)]+)\)\)'
+        sqlite_query = re.sub(epoch_pattern, r'((julianday(\1) - julianday(\2)) * 86400)', sqlite_query, flags=re.IGNORECASE)
+        
+        # Pattern: EXTRACT(EPOCH FROM date_col) -> julianday(date_col) * 86400
+        epoch_pattern2 = r'EXTRACT\(EPOCH\s+FROM\s+([^)]+)\)'
+        sqlite_query = re.sub(epoch_pattern2, r'(julianday(\1) * 86400)', sqlite_query, flags=re.IGNORECASE)
+        
+        # Convert hours calculation: / 3600 -> / 3600.0
+        sqlite_query = sqlite_query.replace('/ 3600', '/ 3600.0')
+        
+        # Convert days calculation for resolution time
+        resolution_pattern = r'\(([^)]*closed_date[^)]*)\s*-\s*([^)]*created_date[^)]*)\)\s*/\s*3600\.0'
+        sqlite_query = re.sub(resolution_pattern, r'((julianday(\1) - julianday(\2)) * 24)', sqlite_query, flags=re.IGNORECASE)
+        
+        # More specific pattern for our date difference in hours
+        if 'resolution_hours' in sqlite_query:
+            # Replace the entire EXTRACT pattern specifically for our use case
+            sqlite_query = re.sub(
+                r'EXTRACT\(EPOCH FROM \(closed_date - created_date\)\) / 3600',
+                '((julianday(closed_date) - julianday(created_date)) * 24)',
+                sqlite_query,
+                flags=re.IGNORECASE
+            )
+        
+        # Handle boolean conversions (TRUE/FALSE to 1/0)
+        sqlite_query = sqlite_query.replace('TRUE', '1').replace('FALSE', '0')
+        
+        # Fix string quoting issues (ensure single quotes)
+        sqlite_query = sqlite_query.replace('"', "'")
+        
+        logger.info(f"Converted to SQLite: {sqlite_query}")
+        return sqlite_query
     
     def _generate_natural_language_response(self, question: str, data: List[Dict], complexity: str) -> str:
         """Generate natural language response for simple analysis"""

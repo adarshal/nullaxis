@@ -10,51 +10,77 @@ A LangGraph-based data analytics agent that answers natural language questions a
 - 🔍 **SQL Generation**: Automatic SQL query generation from natural language
 - 📈 **Real-time Analytics**: Live data analysis and insights
 
-## Quick Start
+## Setup Instructions
 
-### Option 1: Quick Setup (Recommended)
-
-```bash
-# Clone the repository
-git clone <your-repo-url>
-cd nullaxis
-
-# Run quick setup (downloads sample data, no Kaggle API needed)
-python quick_setup.py
-
-# Edit .env file and add your DeepSeek API key
-# Then run the app
-streamlit run app.py
-```
-
-### Option 2: Full Setup with Kaggle
+### Step 1: Clone Repository
 
 ```bash
 # Clone the repository
 git clone <your-repo-url>
 cd nullaxis
-
-# Run full setup (requires Kaggle API)
-python setup.py
-
-# Run the app
-streamlit run app.py
 ```
 
-### Option 3: Manual Setup
+### Step 2: Create Virtual Environment
 
 ```bash
-# Install dependencies
+# Create virtual environment
+python -m venv venv
+
+# Activate virtual environment
+# On Windows:
+venv\Scripts\activate
+# On macOS/Linux:
+source venv/bin/activate
+```
+
+### Step 3: Install Dependencies
+
+```bash
+# Install required packages
 pip install -r requirements.txt
+```
 
-# Download data manually
-python download_data.py
+### Step 4: Download Data from Kaggle
 
-# Run the app
+1. Go to [Kaggle NYC 311 Dataset](https://www.kaggle.com/datasets/nycdata/nyc-311-service-requests)
+2. Download the CSV file: `311_Service_Requests_from_2010_to_Present.csv`
+3. Place the downloaded CSV file in the root folder of this project
+
+### Step 5: Setup Database
+
+```bash
+# Run the setup script to create the database
+python setup_existing_data.py
+```
+
+This will:
+- Check for the CSV file
+- Create the SQLite database
+- Process and index the data
+- Generate a summary of the dataset
+
+### Step 6: Configure API Key
+
+1. Edit the `.env` file (created by setup script)
+2. Add your DeepSeek API key:
+```
+DEEPSEEK_API_KEY=your_deepseek_api_key_here
+```
+
+### Step 7: Run the Application
+
+```bash
+# Start the Streamlit app
 streamlit run app.py
 ```
 
-**Note:** The quick setup downloads a sample of 100k records for faster setup. Use the full setup for the complete dataset.
+### Step 8: Use the Application
+
+1. Open your browser and visit the URL shown in the terminal (usually `http://localhost:8501`)
+2. **First-time loading**: Wait for the app to fully load - you'll see a loading indicator in the top right corner of the Streamlit interface
+3. Wait for the chat component to load completely
+4. for 1st time it may take tie to fully load streamlit app.
+5. Start asking questions about the NYC 311 data!
 
 ## Sample Questions
 
@@ -96,9 +122,8 @@ Edit `config.py` to customize:
 
 ## Requirements
 
-- Python 3.8+
 - DeepSeek API key
-- Internet connection (for initial data download)
+- csv data (311_Service_Requests_from_2010_to_Present.csv)
 
 ## Troubleshooting
 
@@ -108,13 +133,15 @@ Make sure your DeepSeek API key is set in the `.env` file:
 DEEPSEEK_API_KEY=your_key_here
 ```
 
-### Data Download Issues
-If data download fails, you can manually download the NYC 311 dataset and place it in `data/raw/nyc311.csv`.
+### Data File Issues
+If the setup script can't find the CSV file, make sure:
+1. The file is named exactly: `311_Service_Requests_from_2010_to_Present.csv`
+2. The file is placed in the root folder of the project (same level as `setup_existing_data.py`)
 
 ### Database Issues
-If you encounter database errors, delete the existing database file and run `python download_data.py` again.
+If you encounter database errors, delete the existing database file (`data/nyc311.db`) and run `python setup_existing_data.py` again.
 
-## Development
+## inDevelopment
 
 To extend the system:
 
@@ -122,6 +149,3 @@ To extend the system:
 2. Modify the LangGraph workflow in `src/agents/sql_agent.py`
 3. Enhance visualizations in `app.py`
 
-## License
-
-MIT License
