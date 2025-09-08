@@ -149,3 +149,6 @@ To extend the system:
 2. Modify the LangGraph workflow in `src/agents/sql_agent.py`
 3. Enhance visualizations in `app.py`
 
+   <img width="1875" height="796" alt="image" src="https://github.com/user-attachments/assets/5fad91c3-c6df-4969-9293-18f0bc062f47" />
+
+
