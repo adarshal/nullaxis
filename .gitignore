@@ -371,3 +371,5 @@ FodyWeavers.xsd
 # Large data files that exceed GitHub's 100MB limit
 311_Service_Requests_from_2010_to_Present.csv
 *.csv
+data/nyc311.db
+*.db
