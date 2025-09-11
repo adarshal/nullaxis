@@ -341,8 +341,8 @@ def main():
         with st.chat_message("assistant"):
             # Show analysis type detection
             is_complex = detect_question_complexity(prompt)
-            # analysis_type = "🤖 **Multi-Step Analysis**" if is_complex else "⚡ **Simple Analysis**"
-            # st.info(f"{analysis_type} - {('Planning multi-agent coordination...' if is_complex else 'Executing direct query...')}")
+            analysis_type = "🤖 **Multi-Step Analysis**" if is_complex else "⚡ **Data** Analysis**"
+            st.info(f"{analysis_type} - {('Planning multi-agent coordination...' if is_complex else 'Analysing...')}")
             
             with st.spinner("🤖 Multi-agent system analyzing your question..."):
                 try:

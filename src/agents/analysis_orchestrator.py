@@ -728,43 +728,104 @@ else:
         return sqlite_query
     
     def _generate_natural_language_response(self, question: str, data: List[Dict], complexity: str) -> str:
-        """Generate natural language response for simple analysis"""
+        """Generate natural language response for simple analysis using LLM"""
         if not data:
             return "No data was found for your question."
         
-        # Basic response generation
-        if len(data) == 1 and len(data[0]) == 1:
-            # Single metric
-            value = list(data[0].values())[0]
-            return f"The result is: {value:,}" if isinstance(value, (int, float)) else f"The result is: {value}"
-        
-        elif len(data) <= 10:
-            # Top N results
-            response = f"Based on the analysis, here are the key findings:\n"
-            for i, record in enumerate(data[:5], 1):  # Show top 5
-                if len(record) == 2:
-                    keys = list(record.keys())
-                    response += f"• {record[keys[0]]}: {record[keys[1]]:,}\n"
-            return response
-        
-        return f"Found {len(data)} results for your question about NYC 311 complaints."
+        # Use LLM to generate a meaningful response
+        try:
+            data_summary = json.dumps(data[:10], indent=2)  # Limit to top 10 for context
+            
+            prompt = f"""You are a data analyst. Based on the following data from NYC 311 complaints, provide a clear, insightful response to the user's question.
+
+User Question: "{question}"
+
+Data:
+{data_summary}
+
+Please provide:
+1. A direct answer to their question
+2. Key insights from the data
+3. Notable patterns or findings
+4. Specific numbers and statistics
+
+Keep it concise but informative. Focus on what the user actually asked for."""
+
+            response = self.deepseek_client.client.invoke([HumanMessage(content=prompt)])
+            return response.content.strip()
+            
+        except Exception as e:
+            logger.warning(f"LLM response generation failed: {e}, falling back to basic response")
+            # Fallback to basic response
+            if len(data) == 1 and len(data[0]) == 1:
+                value = list(data[0].values())[0]
+                return f"The result is: {value:,}" if isinstance(value, (int, float)) else f"The result is: {value}"
+            elif len(data) <= 10:
+                response = f"Based on the analysis, here are the key findings:\n"
+                for i, record in enumerate(data[:5], 1):
+                    if len(record) == 2:
+                        keys = list(record.keys())
+                        response += f"• {record[keys[0]]}: {record[keys[1]]:,}\n"
+                return response
+            return f"Found {len(data)} results for your question about NYC 311 complaints."
     
     def _generate_multi_step_response(self, question: str, steps: List[StepResult], complexity: str) -> str:
-        """Generate comprehensive natural language response for multi-step analysis"""
+        """Generate comprehensive natural language response for multi-step analysis using LLM"""
         successful_steps = [s for s in steps if s["success"]]
         
         if not successful_steps:
             return "I was unable to complete the analysis steps for your question."
         
-        response = f"I completed a {complexity} analysis with {len(successful_steps)} steps:\n\n"
-        
-        for i, step in enumerate(successful_steps, 1):
-            if step["data"]:
-                response += f"**Step {i}:** Found {len(step['data'])} results\n"
-        
-        # Add summary from the final step
-        final_step = successful_steps[-1]
-        if final_step["data"]:
-            response += f"\n**Final Results:** {self._generate_natural_language_response(question, final_step['data'], complexity)}"
-        
-        return response
+        # Use LLM to generate a comprehensive response
+        try:
+            # Prepare step summaries for context
+            step_summaries = []
+            for i, step in enumerate(successful_steps, 1):
+                if step["data"]:
+                    step_data = step["data"][:5]  # Limit to top 5 for context
+                    step_summaries.append(f"Step {i}: {json.dumps(step_data, indent=2)}")
+            
+            # Get final results
+            final_step = successful_steps[-1]
+            final_data = final_step["data"][:10] if final_step["data"] else []
+            
+            context = "\n\n".join(step_summaries)
+            final_data_json = json.dumps(final_data, indent=2)
+            
+            prompt = f"""You are a data analyst. I completed a multi-step analysis for a user's question about NYC 311 complaints. 
+
+User Question: "{question}"
+
+Analysis Steps Completed:
+{context}
+
+Final Results:
+{final_data_json}
+
+Please provide a comprehensive response that:
+1. Directly answers the user's question
+2. Explains the key findings from each step
+3. Highlights the most important insights
+4. Provides specific numbers and statistics
+5. Explains what the data means in practical terms
+
+Make it engaging and informative, focusing on what the user actually asked for."""
+
+            response = self.deepseek_client.client.invoke([HumanMessage(content=prompt)])
+            return response.content.strip()
+            
+        except Exception as e:
+            logger.warning(f"LLM multi-step response generation failed: {e}, falling back to basic response")
+            # Fallback to basic response
+            response = f"I completed a {complexity} analysis with {len(successful_steps)} steps:\n\n"
+            
+            for i, step in enumerate(successful_steps, 1):
+                if step["data"]:
+                    response += f"**Step {i}:** Found {len(step['data'])} results\n"
+            
+            # Add summary from the final step
+            final_step = successful_steps[-1]
+            if final_step["data"]:
+                response += f"\n**Final Results:** {self._generate_natural_language_response(question, final_step['data'], complexity)}"
+            
+            return response
