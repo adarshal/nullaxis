@@ -18,6 +18,10 @@ class CodeWriter:
     
     def execute_custom_code(self, code: str, query: str) -> Dict[str, Any]:
         """Execute custom Python code for data analysis"""
+        logger.info("CODEWRITER: Starting custom Python code execution")
+        #  logger.info(f"Query: {query}")
+        logger.info(f"Code length: {len(code)} characters")
+  
         try:
             # Validate code safety
             if not self._validate_code(code):
@@ -50,12 +54,15 @@ class CodeWriter:
             
             try:
                 # Execute code
+                logger.info("CODEWRITER: Executing custom Python code")
+
                 exec(code, exec_globals)
                 
                 # Get result
                 result = exec_globals.get('result', 'No result variable set')
                 output = captured_output.getvalue()
-                
+                logger.info(f"CODEWRITER: Code execution successful")
+
                 # Determine chart type
                 chart_type = self._determine_chart_type_from_result(result)
                 
@@ -162,41 +169,3 @@ class CodeWriter:
         """Safe print function that doesn't interfere with execution"""
         pass
     
-    def generate_analysis_template(self, query: str) -> str:
-        """Generate a template for custom analysis"""
-        template = f'''
-# Custom Analysis for: "{query}"
-# Available data in 'df' DataFrame
-
-# Example analysis structure:
-# 1. Filter data if needed
-# filtered_df = df[df['column'] == 'value']
-
-# 2. Perform analysis
-# result = df.groupby('column').size().sort_values(ascending=False)
-
-# 3. Set result variable
-# result = your_analysis_result
-
-# Your analysis code here:
-result = "Please implement your analysis"
-'''
-        return template
-    
-    def suggest_analysis_approach(self, query: str) -> str:
-        """Suggest analysis approach based on query"""
-        query_lower = query.lower()
-        
-        if 'top' in query_lower and 'complaint' in query_lower:
-            return '''
-# Suggested approach for top complaints:
-result = df['complaint_type'].value_counts().head(10)
-'''
-        elif 'percent' in query_lower and 'closed' in query_lower:
-            return '''
-# Suggested approach for closure percentage:
-df['closure_days'] = (df['closed_date'] - df['created_date']).dt.days
-closed_within_3_days = (df['closure_days'] <= 3).sum()
-total_closed = df['closed_date'].notna().sum()
-res
-'''

@@ -178,13 +178,18 @@ class AnalysisOrchestrator:
         
         try:
             if step["agent_type"] == "sql":
+                logger.info("🔧 Using SQL Agent for execution")
                 return self._execute_sql_step(step, context)
             elif step["agent_type"] == "prebuilt":
+                logger.info("Using PrebuiltAnalytics executor")
                 return self._execute_prebuilt_step(step, context)
             elif step["agent_type"] == "custom":
+                logger.info("CODEWRITER: Using CodeWriter executor for custom Python analysis")
                 return self._execute_custom_step(step, context)
             elif step["agent_type"] == "transform":
+                logger.info("Using data transformation")
                 return self._execute_transform_step(step, context)
+            
             else:
                 return {
                     "step_id": step["step_id"],
