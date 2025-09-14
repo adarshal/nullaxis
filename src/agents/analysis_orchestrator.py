@@ -173,10 +173,17 @@ class AnalysisOrchestrator:
         }
     
     def _execute_step(self, step: AnalysisStep, context: Dict[str, Any]) -> StepResult:
-        """Execute a single analysis step"""
+        """Execute a single analysis step with LLM-based agent selection"""
         logger.info(f"Executing step {step['step_id']}: {step['description']}")
         
         try:
+            # Use LLM to select the best agent for this step
+            selected_agent = self._select_best_agent_for_step(step, context)
+            logger.info(f"LLM selected agent: {selected_agent} (original: {step['agent_type']})")
+            
+            # Override the agent type with LLM selection
+            step["agent_type"] = selected_agent
+            
             if step["agent_type"] == "sql":
                 logger.info("🔧 Using SQL Agent for execution")
                 return self._execute_sql_step(step, context)
@@ -304,45 +311,30 @@ class AnalysisOrchestrator:
                 "open_vs_closed": self.prebuilt_analytics.open_vs_closed
             }
             
-            # Try to match the function call
-            for func_name, func in function_mappings.items():
-                if func_name in function_call.lower():
-                    # Extract parameters (simple implementation)
-                    if "top_k" in function_call.lower() and "complaint_type" in function_call.lower():
-                        result = self.prebuilt_analytics.get_top_k("complaint_type", 10)
-                    elif "closed_within" in function_call.lower():
-                        result = self.prebuilt_analytics.percent_closed_within_days(3, "complaint_type")
-                    elif "by_zip" in function_call.lower():
-                        result = self.prebuilt_analytics.complaints_by_zip(10)
-                    elif "by_borough" in function_call.lower():
-                        result = self.prebuilt_analytics.complaints_by_borough()
-                    elif "time_series" in function_call.lower() or "trend" in function_call.lower():
-                        result = self.prebuilt_analytics.time_series_trend("month")
-                    else:
-                        # Default to the first matched function
-                        result = func()
-                    
-                    if "error" not in result:
-                        return {
-                            "step_id": step["step_id"],
-                            "success": True,
-                            "data": result["data"],
-                            "error": None,
-                            "metadata": {
-                                "step": step,
-                                "function": func_name,
-                                "row_count": len(result["data"]) if result["data"] else 0,
-                                "chart_type": result.get("chart_type", "bar")
-                            }
-                        }
-                    else:
-                        return {
-                            "step_id": step["step_id"],
-                            "success": False,
-                            "data": None,
-                            "error": result["error"],
-                            "metadata": {"step": step, "function": func_name}
-                        }
+            # Use LLM to select and execute the best prebuilt function
+            result = self._execute_prebuilt_with_llm(function_call, function_mappings, step)
+            
+            if result and "error" not in result:
+                return {
+                    "step_id": step["step_id"],
+                    "success": True,
+                    "data": result.get("data", []),
+                    "error": None,
+                    "metadata": {
+                        "step": step,
+                        "function": result.get("function_name", "unknown"),
+                        "row_count": len(result.get("data", [])) if result.get("data") else 0,
+                        "chart_type": result.get("chart_type", "bar")
+                    }
+                }
+            else:
+                return {
+                    "step_id": step["step_id"],
+                    "success": False,
+                    "data": None,
+                    "error": result.get("error", "Function execution failed"),
+                    "metadata": {"step": step, "function": "unknown"}
+                }
             
             # If no function matched, fall back to SQL execution
             logger.warning(f"No prebuilt function matched for: {function_call}, falling back to SQL")
@@ -363,8 +355,13 @@ class AnalysisOrchestrator:
         logger.info(f"Executing custom Python analysis: {step['description']}")
         
         try:
-            # Generate Python code based on the step description and context
-            code_prompt = self._generate_custom_code_from_step(step, context)
+            
+            # Option 1: Use LLM for code generation
+            code_prompt = self.deepseek_client.generate_analysis_code(step["query"])
+            
+            # Option 2: Use template-based generation (current)
+            # code_prompt = self._generate_custom_code_from_step(step, context)
+        
             
             # Execute custom code
             result = self.code_writer.execute_custom_code(code_prompt, step["query"])
@@ -420,92 +417,298 @@ class AnalysisOrchestrator:
             }
     
     def _generate_custom_code_from_step(self, step: AnalysisStep, context: Dict[str, Any]) -> str:
-        """Generate Python code for custom analysis based on step description and context"""
+        """Generate Python code using LLM instead of hardcoded templates"""
         description = step["description"]
+        query = step["query"]
         
-        # Start with basic template
-        code = """
-# Custom analysis for: {description}
-
-""".format(description=description)
-        
-        # Add context data if available
+        # Prepare context information
+        context_info = ""
         if context:
-            code += "# Context from previous steps:\n"
+            context_info = "Context from previous steps:\n"
             for step_id, data in context.items():
                 if data:
-                    code += f"# {step_id}: {len(data)} records\n"
+                    context_info += f"- {step_id}: {len(data)} records\n"
         
-        # Generate specific code based on description patterns
-        description_lower = description.lower()
+        # Use LLM to generate custom Python code
+        code_prompt = f"""
+        Generate Python pandas code to analyze NYC 311 complaints data.
         
-        if "seasonal" in description_lower and "trend" in description_lower:
-            code += """
-# Analyze seasonal trends
-df['created_date'] = pd.to_datetime(df['created_date'])
-df['month'] = df['created_date'].dt.month
-df['year'] = df['created_date'].dt.year
-
-# Group by month and complaint type for seasonal analysis
-seasonal_data = df.groupby(['month', 'complaint_type']).size().reset_index(name='count')
-
-# Focus on top complaint types if specified in context
-if len(seasonal_data) > 100:  # If too much data, focus on top types
-    top_types = df.groupby('complaint_type').size().nlargest(3).index.tolist()
-    seasonal_data = seasonal_data[seasonal_data['complaint_type'].isin(top_types)]
-
-result = seasonal_data.to_dict('records')
-"""
+        Question: "{query}"
+        Description: "{description}"
         
-        elif "percent" in description_lower and "closed" in description_lower:
-            code += """
-# Calculate closure percentages
-df['closure_days'] = (pd.to_datetime(df['closed_date']) - pd.to_datetime(df['created_date'])).dt.days
-df['closed_within_3_days'] = (df['closure_days'] <= 3) & (df['closure_days'] >= 0)
-
-# Group by complaint type
-closure_stats = df.groupby('complaint_type').agg({
-    'closed_within_3_days': ['count', 'sum'],
-    'unique_key': 'count'
-}).round(2)
-
-closure_stats.columns = ['total_closed_3days', 'count_closed_3days', 'total_complaints']
-closure_stats['percentage_closed_3days'] = (
-    closure_stats['count_closed_3days'] / closure_stats['total_complaints'] * 100
-).round(2)
-
-result = closure_stats.reset_index().to_dict('records')
-"""
+        {context_info}
         
-        elif "fastest" in description_lower or "resolution" in description_lower:
-            code += """
-# Calculate resolution times
-df['resolution_days'] = (pd.to_datetime(df['closed_date']) - pd.to_datetime(df['created_date'])).dt.days
-df_closed = df[df['closed_date'].notna() & (df['resolution_days'] >= 0)]
-
-# Group by the relevant dimension (zip, borough, etc.)
-group_col = 'incident_zip' if 'zip' in description.lower() else 'borough'
-resolution_stats = df_closed.groupby(group_col).agg({
-    'resolution_days': ['mean', 'count']
-}).round(2)
-
-resolution_stats.columns = ['avg_resolution_days', 'complaint_count']
-resolution_stats = resolution_stats[resolution_stats['complaint_count'] >= 10]  # Filter for significance
-
-result = resolution_stats.sort_values('avg_resolution_days').reset_index().to_dict('records')
-"""
+        Available data in 'df' DataFrame:
+        - unique_key, created_date, closed_date, complaint_type, descriptor
+        - status, incident_zip, borough, latitude, longitude, agency
+        - closed_within_3_days, is_geocoded
         
-        else:
-            # Generic aggregation
-            code += """
-# Generic data analysis
+        Requirements:
+        1. Use only pandas, numpy, datetime, math, statistics libraries
+        2. Handle missing values appropriately
+        3. Set the result in a 'result' variable
+        4. Include comments explaining the logic
+        5. Make the code efficient and readable
+        6. Return data as list of dictionaries for JSON serialization
+        
+        Return only the Python code, no explanations or markdown formatting.
+        """
+        
+        try:
+            response = self.deepseek_client.client.invoke([HumanMessage(content=code_prompt)])
+            generated_code = response.content.strip()
+            
+            # Clean up the code (remove markdown formatting if present)
+            if generated_code.startswith("```python"):
+                generated_code = generated_code[9:]
+            if generated_code.endswith("```"):
+                generated_code = generated_code[:-3]
+            
+            # Add header comment
+            final_code = f"""# Custom analysis for: {description}
+# Generated by LLM for question: {query}
+
+{generated_code}"""
+            
+            logger.info(f"Generated custom code for: {description}")
+            return final_code
+            
+        except Exception as e:
+            logger.error(f"Error generating custom code: {e}")
+            # Fallback to basic analysis
+            return f"""# Custom analysis for: {description}
+# Fallback code due to LLM error
+
+# Basic analysis
 if 'complaint_type' in df.columns:
     result = df.groupby('complaint_type').size().sort_values(ascending=False).head(10).reset_index(name='count').to_dict('records')
 else:
     result = df.head(10).to_dict('records')
 """
+    
+    def _select_best_agent_for_step(self, step: AnalysisStep, context: Dict[str, Any]) -> str:
+        """Use LLM to select the best agent for a given step"""
+        description = step["description"]
+        query = step["query"]
+        original_agent = step["agent_type"]
         
-        return code
+        # Prepare context information
+        context_info = ""
+        if context:
+            context_info = "Context from previous steps:\n"
+            for step_id, data in context.items():
+                if data:
+                    context_info += f"- {step_id}: {len(data)} records\n"
+        
+        # Use LLM to select the best agent
+        agent_selection_prompt = f"""
+        You are an expert data analyst. Select the best analysis approach for this step.
+        
+        Step Description: "{description}"
+        Query/Operation: "{query}"
+        Original Agent Type: "{original_agent}"
+        
+        {context_info}
+        
+        Available agents and their strengths:
+        1. SQL Agent: 
+           - Best for: Direct database queries, basic aggregations, filtering
+           - Use when: Simple data retrieval, counting, grouping
+           - Example: "SELECT complaint_type, COUNT(*) FROM complaints GROUP BY complaint_type"
+           
+        2. Prebuilt Analytics:
+           - Best for: Common analytical patterns, pre-built functions
+           - Use when: Top-k analysis, percentages, time series, geospatial
+           - Example: get_top_k('complaint_type', 10), percent_closed_within_days(3)
+           
+        3. Custom Code:
+           - Best for: Complex statistical analysis, correlations, regressions
+           - Use when: Advanced calculations, custom algorithms, data science
+           - Example: Correlation analysis, machine learning, complex transformations
+           
+        4. Data Transform:
+           - Best for: Data manipulation, formatting, combining results
+           - Use when: Merging data, reformatting, preparing for visualization
+           - Example: Combining multiple results, formatting for charts
+        
+        Consider:
+        - Complexity of the analysis
+        - Performance requirements
+        - Data availability and context
+        - Whether prebuilt functions can handle this efficiently
+        
+        Return the best agent type: "sql", "prebuilt", "custom", or "transform"
+        """
+        
+        try:
+            response = self.deepseek_client.client.invoke([HumanMessage(content=agent_selection_prompt)])
+            selected_agent = response.content.strip().lower()
+            
+            # Validate the selection
+            valid_agents = ["sql", "prebuilt", "custom", "transform"]
+            if selected_agent in valid_agents:
+                logger.info(f"LLM selected agent: {selected_agent} for step: {description}")
+                return selected_agent
+            else:
+                logger.warning(f"Invalid agent selection '{selected_agent}', using original: {original_agent}")
+                return original_agent
+                
+        except Exception as e:
+            logger.error(f"Error in LLM agent selection: {e}")
+            return original_agent  # Fallback to original
+    
+    def _execute_prebuilt_with_llm(self, function_call: str, function_mappings: Dict, step: AnalysisStep) -> Dict:
+        """Use LLM to select and execute the best prebuilt function"""
+        
+        # Use LLM to analyze the function call and select appropriate function
+        function_selection_prompt = f"""
+        Analyze this prebuilt function call and select the best function to execute.
+        
+        Function Call: "{function_call}"
+        Step Description: "{step['description']}"
+        
+        Available functions:
+        - get_top_k(column, k): Get top K values by count
+        - percent_closed_within_days(days, group_col): Calculate closure percentages
+        - complaints_by_zip(k): Analyze by ZIP code
+        - complaints_by_borough(): Analyze by borough
+        - time_series_trend(period): Generate time trends
+        - avg_closure_time(group_col): Calculate average closure times
+        - geo_validity(): Check geocoding validity
+        - complaints_by_agency(): Analyze by agency
+        - open_vs_closed(): Compare open vs closed complaints
+        
+        Determine:
+        1. Which function best matches the call
+        2. What parameters to extract
+        3. How to execute it
+        
+        Return JSON:
+        {{
+            "function_name": "function_name",
+            "parameters": {{"param1": "value1", "param2": "value2"}},
+            "reasoning": "Why this function was chosen"
+        }}
+        """
+        
+        try:
+            response = self.deepseek_client.client.invoke([HumanMessage(content=function_selection_prompt)])
+            selection_data = self._extract_json_from_response(response.content)
+            
+            if selection_data:
+                func_name = selection_data.get("function_name")
+                parameters = selection_data.get("parameters", {})
+                
+                # Execute the selected function with parameters
+                if func_name in function_mappings:
+                    func = function_mappings[func_name]
+                    
+                    # Handle different function signatures
+                    if func_name == "get_top_k":
+                        column = parameters.get("column", "complaint_type")
+                        k = parameters.get("k", 10)
+                        result = self.prebuilt_analytics.get_top_k(column, k)
+                    elif func_name == "percent_closed_within_days":
+                        days = parameters.get("days", 3)
+                        group_col = parameters.get("group_col", "complaint_type")
+                        result = self.prebuilt_analytics.percent_closed_within_days(days, group_col)
+                    elif func_name == "complaints_by_zip":
+                        k = parameters.get("k", 10)
+                        result = self.prebuilt_analytics.complaints_by_zip(k)
+                    elif func_name == "time_series_trend":
+                        period = parameters.get("period", "month")
+                        result = self.prebuilt_analytics.time_series_trend(period)
+                    elif func_name == "avg_closure_time":
+                        group_col = parameters.get("group_col", "complaint_type")
+                        result = self.prebuilt_analytics.avg_closure_time(group_col)
+                    else:
+                        # Execute function without parameters
+                        result = func()
+                    
+                    result["function_name"] = func_name
+                    return result
+                else:
+                    logger.warning(f"Unknown function: {func_name}")
+                    return {"error": f"Unknown function: {func_name}"}
+            else:
+                logger.warning("Could not parse function selection")
+                return {"error": "Could not parse function selection"}
+                
+        except Exception as e:
+            logger.error(f"Error in LLM function selection: {e}")
+            return {"error": f"Function selection failed: {e}"}
+    
+    def _apply_llm_transformation(self, df: pd.DataFrame, transform_data: Dict[str, Any]) -> pd.DataFrame:
+        """Apply transformation based on LLM analysis"""
+        transform_type = transform_data.get("transformation_type", "custom")
+        parameters = transform_data.get("parameters", {})
+        
+        try:
+            if transform_type == "combine" or transform_type == "merge":
+                # Aggregate data from multiple sources
+                if 'complaint_type' in df.columns and 'count' in df.columns:
+                    return df.groupby('complaint_type').agg({'count': 'sum'}).reset_index()
+                else:
+                    return df.groupby(df.columns[0]).sum().reset_index()
+                    
+            elif transform_type == "filter":
+                # Filter top N results
+                n = parameters.get("n", 10)
+                if 'count' in df.columns:
+                    return df.nlargest(n, 'count')
+                else:
+                    return df.head(n)
+                    
+            elif transform_type == "percentage":
+                # Add percentage calculations
+                if 'count' in df.columns:
+                    total = df['count'].sum()
+                    result_df = df.copy()
+                    result_df['percentage'] = (df['count'] / total * 100).round(2)
+                    return result_df
+                else:
+                    return df
+                    
+            elif transform_type == "format":
+                # Format for visualization
+                if len(df.columns) >= 2:
+                    result_df = df.copy()
+                    if df.columns.tolist() != ['category', 'value']:
+                        result_df.columns = ['category', 'value'][:len(df.columns)]
+                    return result_df
+                else:
+                    return df
+                    
+            elif transform_type == "aggregate":
+                # Group and summarize data
+                group_col = parameters.get("group_by", df.columns[0])
+                agg_col = parameters.get("aggregate", df.columns[1] if len(df.columns) > 1 else df.columns[0])
+                return df.groupby(group_col)[agg_col].sum().reset_index()
+                
+            else:
+                # Custom transformation - return as is
+                return df
+                
+        except Exception as e:
+            logger.error(f"Error applying transformation {transform_type}: {e}")
+            return df.head(10)  # Fallback
+    
+    def _extract_json_from_response(self, response: str) -> Optional[Dict[str, Any]]:
+        """Extract JSON from LLM response"""
+        try:
+            import json
+            import re
+            # Try to find JSON in the response
+            json_match = re.search(r'\{.*\}', response, re.DOTALL)
+            if json_match:
+                json_str = json_match.group(0)
+                return json.loads(json_str)
+            else:
+                logger.warning("No JSON found in LLM response")
+                return None
+        except json.JSONDecodeError as e:
+            logger.error(f"JSON parsing error: {e}")
+            return None
     
     def _execute_transform_step(self, step: AnalysisStep, context: Dict[str, Any]) -> StepResult:
         """Execute data transformation step"""
@@ -530,37 +733,43 @@ else:
             # Convert to DataFrame for processing
             df = pd.DataFrame(input_data)
             
-            # Apply transformations based on step description
-            description_lower = step["description"].lower()
-            transformed_data = df
+            # Use LLM to determine appropriate transformation
+            transform_prompt = f"""
+            Determine the best data transformation for this step.
             
-            if "combine" in description_lower or "merge" in description_lower:
-                # Simple combination of results
-                transformed_data = df.groupby('complaint_type').agg({
-                    'count': 'sum'
-                }).reset_index() if 'complaint_type' in df.columns and 'count' in df.columns else df
+            Description: "{step['description']}"
+            Available data columns: {list(df.columns)}
+            Data shape: {df.shape}
+            
+            Common transformations needed:
+            1. combine/merge: Aggregate data from multiple sources
+            2. filter: Select top N or specific records
+            3. percentage: Add percentage calculations
+            4. format: Prepare data for visualization
+            5. aggregate: Group and summarize data
+            
+            Return JSON with transformation details:
+            {{
+                "transformation_type": "combine|filter|percentage|format|aggregate|custom",
+                "parameters": {{"key": "value"}},
+                "reasoning": "Why this transformation was chosen"
+            }}
+            """
+            
+            try:
+                response = self.deepseek_client.client.invoke([HumanMessage(content=transform_prompt)])
+                transform_data = self._extract_json_from_response(response.content)
                 
-            elif "filter" in description_lower:
-                # Filter top N results
-                if 'count' in df.columns:
-                    transformed_data = df.nlargest(10, 'count')
+                if transform_data:
+                    transformed_data = self._apply_llm_transformation(df, transform_data)
                 else:
+                    # Fallback to basic transformation
                     transformed_data = df.head(10)
                     
-            elif "percentage" in description_lower:
-                # Add percentage calculations
-                if 'count' in df.columns:
-                    total = df['count'].sum()
-                    transformed_data = df.copy()
-                    transformed_data['percentage'] = (df['count'] / total * 100).round(2)
-                    
-            elif "format" in description_lower:
-                # Format for visualization
-                if len(df.columns) >= 2:
-                    # Ensure standard column names for charting
-                    transformed_data = df.copy()
-                    if df.columns.tolist() != ['category', 'value']:
-                        transformed_data.columns = ['category', 'value'][:len(df.columns)]
+            except Exception as e:
+                logger.error(f"Error in LLM transformation: {e}")
+                # Fallback to basic transformation
+                transformed_data = df.head(10)
             
             result_data = transformed_data.to_dict('records')
             

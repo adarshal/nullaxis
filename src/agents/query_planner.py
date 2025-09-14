@@ -167,112 +167,140 @@ class QueryPlanner:
         return validated
     
     def _create_simple_fallback_plan(self, question: str) -> AnalysisPlan:
-        """Create a simple single-step plan as fallback using advanced capabilities"""
-        question_lower = question.lower()
+        """Create a simple single-step plan using LLM-based intent analysis instead of keyword matching"""
         
-        # Enhanced intent detection with intelligent agent selection
-        chart_type = "bar"  # default
-        agent_type = "sql"  # default
-        query = "SELECT complaint_type, COUNT(*) as count FROM complaints GROUP BY complaint_type ORDER BY count DESC LIMIT 10"
-        description = f"Analyze: {question}"
+        # Use LLM to analyze question intent and select appropriate agent
+        intent_prompt = f"""
+        You are an expert data analyst. Analyze this question about NYC 311 complaints data and determine the best analysis approach.
         
-        # Use prebuilt analytics for common patterns
-        if any(word in question_lower for word in ['top', 'most', 'highest']) and 'complaint' in question_lower:
-            agent_type = "prebuilt"
-            query = "get_top_k('complaint_type', 10)"
-            description = "Get top complaint types using prebuilt analytics"
+        Question: "{question}"
+        
+        Available data columns:
+        - complaint_type, descriptor, status, agency
+        - created_date, closed_date, incident_zip, borough
+        - latitude, longitude, closed_within_3_days, is_geocoded
+        
+        Available analysis approaches:
+        1. SQL Agent: For direct database queries and basic aggregations
+        2. Prebuilt Analytics: For common patterns like top-k, percentages, time series, geospatial analysis
+        3. Custom Code: For complex statistical analysis, correlations, regressions, custom calculations
+        4. Data Transform: For data manipulation and formatting
+        
+        Prebuilt functions available:
+        - get_top_k(column, k): Get top K values by count
+        - percent_closed_within_days(days, group_col): Calculate closure percentages
+        - complaints_by_zip(k): Analyze by ZIP code
+        - complaints_by_borough(): Analyze by borough
+        - time_series_trend(period): Generate time trends
+        - avg_closure_time(group_col): Calculate average closure times
+        - geo_validity(): Check geocoding validity
+        
+        Determine:
+        1. What type of analysis is needed (aggregation, statistical, time-series, geospatial, custom)
+        2. Which agent would be most appropriate
+        3. What specific query or function call would work best
+        4. What visualization would be most suitable
+        
+        Return JSON:
+        {{
+            "agent_type": "sql|prebuilt|custom|transform",
+            "query": "Specific SQL query or function call",
+            "description": "Human readable description of what this analysis will do",
+            "visualization": "bar|pie|line|table|metric",
+            "reasoning": "Why this approach was chosen"
+        }}
+        """
+        
+        try:
+            response = self.reasoner.invoke([HumanMessage(content=intent_prompt)])
+            logger.info(f"Intent analysis: {response.content[:200]}...")
             
-        elif any(word in question_lower for word in ['percent', 'percentage', 'proportion']):
-            chart_type = "pie"
-            if 'closed within 3 days' in question_lower:
-                agent_type = "prebuilt"
-                query = "percent_closed_within_days(3, 'complaint_type')"
-                description = "Calculate closure percentages using prebuilt analytics"
-            elif 'geocoded' in question_lower or 'latitude' in question_lower or 'longitude' in question_lower:
-                agent_type = "prebuilt"
-                query = "geo_validity()"
-                description = "Check geocoding validity using prebuilt analytics"
+            # Extract JSON from response
+            intent_data = self._extract_json_from_response(response.content)
+            
+            if intent_data:
+                return {
+                    "question": question,
+                    "complexity": "simple",
+                    "requires_multi_step": False,
+                    "steps": [{
+                        "step_id": "step_1",
+                        "description": intent_data.get("description", f"Analyze: {question}"),
+                        "agent_type": intent_data.get("agent_type", "sql"),
+                        "query": intent_data.get("query", "SELECT complaint_type, COUNT(*) as count FROM complaints GROUP BY complaint_type ORDER BY count DESC LIMIT 10"),
+                        "depends_on": [],
+                        "output_type": "data"
+                    }],
+                    "final_visualization": intent_data.get("visualization", "bar")
+                }
+            else:
+                # Ultimate fallback if LLM fails
+                logger.warning("LLM intent analysis failed, using basic fallback")
+                return self._create_basic_fallback_plan(question)
                 
-        elif any(word in question_lower for word in ['zip', 'zipcode', 'zip code']):
-            agent_type = "prebuilt"
-            query = "complaints_by_zip(10)"
-            description = "Analyze complaints by ZIP code using prebuilt analytics"
-            
-        elif 'borough' in question_lower:
-            chart_type = "pie"
-            agent_type = "prebuilt"
-            query = "complaints_by_borough()"
-            description = "Analyze complaints by borough using prebuilt analytics"
-            
-        elif any(word in question_lower for word in ['trend', 'time', 'seasonal', 'monthly']):
-            chart_type = "line"
-            agent_type = "prebuilt"
-            query = "time_series_trend('month')"
-            description = "Generate time series trends using prebuilt analytics"
-            
-        elif any(word in question_lower for word in ['resolution', 'closure', 'response']):
-            agent_type = "prebuilt"
-            query = "avg_closure_time('complaint_type')"
-            description = "Calculate average closure times using prebuilt analytics"
-            
-        # For complex statistical questions, use custom analysis
-        elif any(pattern in question_lower for pattern in ['correlation', 'regression', 'distribution', 'variance', 'standard deviation']):
-            agent_type = "custom"
-            query = question  # Pass the full question for custom code generation
-            description = "Perform statistical analysis using custom Python code"
-            
+        except Exception as e:
+            logger.error(f"Error in LLM intent analysis: {e}")
+            return self._create_basic_fallback_plan(question)
+    
+    def _create_basic_fallback_plan(self, question: str) -> AnalysisPlan:
+        """Ultimate fallback plan with minimal hardcoded logic"""
         return {
             "question": question,
             "complexity": "simple",
             "requires_multi_step": False,
             "steps": [{
                 "step_id": "step_1",
-                "description": description,
-                "agent_type": agent_type,
-                "query": query,
+                "description": f"Analyze: {question}",
+                "agent_type": "sql",
+                "query": "SELECT complaint_type, COUNT(*) as count FROM complaints GROUP BY complaint_type ORDER BY count DESC LIMIT 10",
                 "depends_on": [],
                 "output_type": "data"
             }],
-            "final_visualization": chart_type
+            "final_visualization": "bar"
         }
     
     def detect_question_patterns(self, question: str) -> Dict[str, Any]:
-        """Detect common question patterns that indicate multi-step analysis"""
-        patterns = {
-            "top_N_with_condition": {
-                "pattern": r"top\s+(\d+).*?(percent|percentage|%)",
-                "example": "For the top 5 complaint types, what percent were closed within 3 days?",
-                "requires_multi_step": True
-            },
-            "comparative_analysis": {
-                "pattern": r"(compare|versus|vs|difference).*(across|between)",
-                "example": "Compare resolution times across boroughs",
-                "requires_multi_step": True
-            },
-            "filtered_ranking": {
-                "pattern": r"(which|what).*?(manhattan|brooklyn|queens|bronx|staten).*(fastest|slowest|highest|lowest)",
-                "example": "Which Manhattan ZIP codes have the fastest resolution times?",
-                "requires_multi_step": True
-            },
-            "time_trend_analysis": {
-                "pattern": r"(trend|over time|monthly|seasonal|pattern)",
-                "example": "Show monthly trends for noise complaints",
-                "requires_multi_step": True
-            }
-        }
+        """Detect question patterns using LLM-based analysis instead of regex patterns"""
+        pattern_prompt = f"""
+        Analyze this question about NYC 311 complaints data to detect analysis patterns:
         
-        question_lower = question.lower()
-        detected_patterns = []
+        Question: "{question}"
         
-        for pattern_name, pattern_info in patterns.items():
-            if re.search(pattern_info["pattern"], question_lower, re.IGNORECASE):
-                detected_patterns.append({
-                    "name": pattern_name,
-                    "requires_multi_step": pattern_info["requires_multi_step"]
-                })
+        Determine if this question requires:
+        1. Multi-step analysis (complex operations that need multiple queries/steps)
+        2. Single-step analysis (can be answered with one query/operation)
+        3. What type of analysis pattern it follows
         
+        Return JSON:
+        {{
+            "requires_multi_step": true/false,
+            "complexity": "simple|moderate|complex",
+            "analysis_type": "aggregation|comparison|trend|statistical|geospatial|custom",
+            "reasoning": "Why this classification was chosen"
+        }}
+        """
+        
+        try:
+            response = self.reasoner.invoke([HumanMessage(content=pattern_prompt)])
+            pattern_data = self._extract_json_from_response(response.content)
+            
+            if pattern_data:
+                return {
+                    "detected_patterns": [{"name": pattern_data.get("analysis_type", "unknown"), "requires_multi_step": pattern_data.get("requires_multi_step", False)}],
+                    "requires_multi_step": pattern_data.get("requires_multi_step", False),
+                    "complexity": pattern_data.get("complexity", "simple")
+                }
+            else:
+                # Fallback to simple analysis
+                return {
+                    "detected_patterns": [],
+                    "requires_multi_step": False,
+                    "complexity": "simple"
+                }
+        except Exception as e:
+            logger.error(f"Error in pattern detection: {e}")
         return {
-            "detected_patterns": detected_patterns,
-            "requires_multi_step": any(p["requires_multi_step"] for p in detected_patterns),
-            "complexity": "complex" if detected_patterns else "simple"
+                "detected_patterns": [],
+                "requires_multi_step": False,
+                "complexity": "simple"
         }
