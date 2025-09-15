@@ -519,7 +519,16 @@ else:
         2. Prebuilt Analytics:
            - Best for: Common analytical patterns, pre-built functions
            - Use when: Top-k analysis, percentages, time series, geospatial
-           - Example: get_top_k('complaint_type', 10), percent_closed_within_days(3)
+           - Available functions:
+             * get_top_k(column, k): Get top K values by count
+             * percent_closed_within_days(days, group_col): Calculate closure percentages
+             * complaints_by_zip(k): Analyze by ZIP code
+             * complaints_by_borough(): Analyze by borough
+             * time_series_trend(period): Generate time trends (month, week, day)
+             * avg_closure_time(group_col): Calculate average closure times
+             * geo_validity(): Check geocoding validity
+             * complaints_by_agency(): Analyze by agency
+             * open_vs_closed(): Compare open vs closed complaints
            
         3. Custom Code:
            - Best for: Complex statistical analysis, correlations, regressions
@@ -537,12 +546,34 @@ else:
         - Data availability and context
         - Whether prebuilt functions can handle this efficiently
         
-        Return the best agent type: "sql", "prebuilt", "custom", or "transform"
+        IMPORTANT: Return ONLY the agent type name, nothing else.
+        Valid responses: sql, prebuilt, custom, or transform
         """
         
         try:
             response = self.deepseek_client.client.invoke([HumanMessage(content=agent_selection_prompt)])
-            selected_agent = response.content.strip().lower()
+            response_text = response.content.strip()
+            logger.debug(f"LLM agent selection response: '{response_text}'")
+            
+            # Extract just the agent type from the response
+            # Handle cases where LLM includes reasoning text
+            selected_agent = None
+            
+            # First, try to find exact matches in any line
+            lines = response_text.split('\n')
+            for line in lines:
+                line = line.strip().lower()
+                if line in ["sql", "prebuilt", "custom", "transform"]:
+                    selected_agent = line
+                    break
+            
+            # If no exact match, try to find agent type anywhere in the response
+            if not selected_agent:
+                response_lower = response_text.lower()
+                for agent in ["sql", "prebuilt", "custom", "transform"]:
+                    if agent in response_lower:
+                        selected_agent = agent
+                        break
             
             # Validate the selection
             valid_agents = ["sql", "prebuilt", "custom", "transform"]
@@ -550,7 +581,7 @@ else:
                 logger.info(f"LLM selected agent: {selected_agent} for step: {description}")
                 return selected_agent
             else:
-                logger.warning(f"Invalid agent selection '{selected_agent}', using original: {original_agent}")
+                logger.warning(f"Could not extract valid agent from response: '{response_text}', using original: {original_agent}")
                 return original_agent
                 
         except Exception as e:
@@ -844,7 +875,9 @@ else:
                 
                 # Case 1: IN clause with specific values
                 step_table_ref = f"{step_id}_output"
-                if step_table_ref in adapted_query:
+                step_table_ref_braced = f"{{{step_id}_output}}"
+                
+                if step_table_ref in adapted_query or step_table_ref_braced in adapted_query:
                     # Extract values from the context data
                     if data and isinstance(data[0], dict):
                         # Try to find the right column to extract
@@ -854,9 +887,19 @@ else:
                         if 'complaint_type' in first_record:
                             complaint_types = [f"'{record['complaint_type']}'" for record in data]
                             values_list = "(" + ", ".join(complaint_types) + ")"
+                            
+                            # Replace both formats
                             adapted_query = adapted_query.replace(
                                 f"(SELECT complaint_type FROM {step_table_ref})", 
                                 values_list
+                            )
+                            adapted_query = adapted_query.replace(
+                                f"'{step_table_ref_braced}'", 
+                                f"'{data[0]['complaint_type']}'"
+                            )
+                            adapted_query = adapted_query.replace(
+                                step_table_ref_braced, 
+                                f"'{data[0]['complaint_type']}'"
                             )
                             logger.info(f"Replaced {step_table_ref} with {len(complaint_types)} complaint types")
                         
@@ -921,6 +964,19 @@ else:
         # Convert days calculation for resolution time
         resolution_pattern = r'\(([^)]*closed_date[^)]*)\s*-\s*([^)]*created_date[^)]*)\)\s*/\s*3600\.0'
         sqlite_query = re.sub(resolution_pattern, r'((julianday(\1) - julianday(\2)) * 24)', sqlite_query, flags=re.IGNORECASE)
+        
+        # Replace DATE_TRUNC with SQLite strftime
+        # Pattern: DATE_TRUNC('month', column) -> strftime('%Y-%m', column) || '-01'
+        date_trunc_pattern = r"DATE_TRUNC\('month',\s*([^)]+)\)"
+        sqlite_query = re.sub(date_trunc_pattern, r"strftime('%Y-%m', \1) || '-01'", sqlite_query, flags=re.IGNORECASE)
+        
+        # Pattern: DATE_TRUNC('year', column) -> strftime('%Y', column) || '-01-01'
+        date_trunc_year_pattern = r"DATE_TRUNC\('year',\s*([^)]+)\)"
+        sqlite_query = re.sub(date_trunc_year_pattern, r"strftime('%Y', \1) || '-01-01'", sqlite_query, flags=re.IGNORECASE)
+        
+        # Pattern: DATE_TRUNC('day', column) -> strftime('%Y-%m-%d', column)
+        date_trunc_day_pattern = r"DATE_TRUNC\('day',\s*([^)]+)\)"
+        sqlite_query = re.sub(date_trunc_day_pattern, r"strftime('%Y-%m-%d', \1)", sqlite_query, flags=re.IGNORECASE)
         
         # More specific pattern for our date difference in hours
         if 'resolution_hours' in sqlite_query:
