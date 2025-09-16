@@ -140,14 +140,13 @@ class AnalysisOrchestrator:
         
         # Combine results for final response
         if executed_steps:
-            # Use the last successful step's data as primary result
-            final_result = None
-            for step_result in reversed(executed_steps):
+            # Collect all successful step results with their chart types
+            successful_results = []
+            for step_result in executed_steps:
                 if step_result["success"] and step_result["data"]:
-                    final_result = step_result
-                    break
+                    successful_results.append(step_result)
             
-            if final_result:
+            if successful_results:
                 # Generate comprehensive natural language response
                 nl_response = self._generate_multi_step_response(
                     plan["question"], 
@@ -155,13 +154,24 @@ class AnalysisOrchestrator:
                     plan["complexity"]
                 )
                 
-                return {
-                    "natural_language_response": nl_response,
-                    "data": final_result["data"],
-                    "chart_type": plan["final_visualization"],
-                    "execution_steps": executed_steps,
-                    "success": True
-                }
+                # For multi-chart support, return all successful results
+                if len(successful_results) > 1:
+                    return {
+                        "natural_language_response": nl_response,
+                        "data": successful_results,  # Return array of results
+                        "chart_type": "multi",  # Special type for multiple charts
+                        "execution_steps": executed_steps,
+                        "success": True
+                    }
+                else:
+                    # Single result - use the existing format
+                    return {
+                        "natural_language_response": nl_response,
+                        "data": successful_results[0]["data"],
+                        "chart_type": successful_results[0].get("chart_type", plan["final_visualization"]),
+                        "execution_steps": executed_steps,
+                        "success": True
+                    }
         
         # Fallback if all steps failed
         return {

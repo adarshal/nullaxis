@@ -364,8 +364,21 @@ def main():
                                 chart_key = f"multi_chart_{int(time.time() * 1000)}"
                                 st.plotly_chart(chart, use_container_width=True, key=chart_key)
                         
+                        # Handle multiple charts from multi-step analysis
+                        elif isinstance(result.get("data"), list) and result.get("chart_type") == "multi":
+                            st.subheader("📊 Analysis Results")
+                            for i, chart_data in enumerate(result["data"]):
+                                if chart_data.get("data") and chart_data.get("chart_type"):
+                                    chart = create_chart(
+                                        chart_data["data"], 
+                                        chart_data["chart_type"]
+                                    )
+                                    if chart:
+                                        chart_key = f"multi_step_chart_{i}_{int(time.time() * 1000)}"
+                                        st.plotly_chart(chart, use_container_width=True, key=chart_key)
+                        
                         # Show raw data if available
-                        if result["data"]:
+                        if result["data"] and not (isinstance(result.get("data"), list) and result.get("chart_type") == "multi"):
                             with st.expander("📊 View Raw Data"):
                                 table_key = f"multi_table_{int(time.time() * 1000)}"
                                 st.dataframe(pd.DataFrame(result["data"]), key=table_key)

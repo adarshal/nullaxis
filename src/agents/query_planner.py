@@ -81,6 +81,11 @@ class QueryPlanner:
           Step 1: Filter to Manhattan ZIP codes
           Step 2: Calculate average resolution time by ZIP code
           Step 3: Rank by fastest resolution
+          
+        - "Make pie chart of top 10 complaint types. Also make line graph of per month complaints count."
+          Step 1: Get top 10 complaint types by count (pie chart)
+          Step 2: Get monthly complaint counts (line chart)
+          Note: Use "multi" as final_visualization for multiple charts
         
         RETURN VALID JSON with this structure:
         {{
@@ -98,7 +103,7 @@ class QueryPlanner:
                     "output_type": "data" | "metric" | "aggregation"
                 }}
             ],
-            "final_visualization": "bar" | "pie" | "line" | "table" | "metric"
+            "final_visualization": "bar" | "pie" | "line" | "table" | "metric" | "multi"
         }}
         
         Think step by step and create the most efficient plan.
